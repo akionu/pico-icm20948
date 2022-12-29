@@ -1,149 +1,42 @@
 #include <stdio.h>
+#include <time.h>
+#include <math.h>
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
+#include "./MadgwickAHRS/MadgwickAHRS.h"
+#include "pico-icm20948.c"
 
-#define I2C_BUS (__CONCAT(i2c, 1))
+typedef struct icm20984_data {
+    int16_t accel_raw[3];
+    int16_t accel_bias[3];
+    int16_t gyro_raw[3];
+    int16_t gyro_bias[3];
+    int16_t mag_raw[3];
+    int16_t temp_raw;
+} icm20984_data_t;
 
-static uint8_t addr_accel_gyro = 0x68;
-static uint8_t addr_mag_read = 0x0C;
+icm20984_data_t data;
 
-void icm20948_set_mag_mode(uint8_t mode);
+bool dataflag = false;
 
-int8_t icm20948_init() {
-    uint8_t reg[2], buf;
-
-    // check if the accel/gyro could be accessed
-    reg[0] = 0x00;
-    i2c_write_blocking(I2C_BUS, addr_accel_gyro, reg, 1, true);
-    i2c_read_blocking(I2C_BUS, addr_accel_gyro, &buf, 1, false);
-#ifndef NDEBUG    
-    printf("AG. WHO_AM_I: 0x%X\n", buf);
-#endif
-    if (buf != 0xEA) return -1;
-
-    // wake up accel/gyro! (PWR_MGMT_2)
-    // first write register then, write value
-    reg[0] = 0x06; reg[1] = 0x00;
-    i2c_write_blocking(I2C_BUS, addr_accel_gyro, reg, 2, false);
-
-    // wake up mag! (INT_PIN_CFG, BYPASS_EN = 1)
-    reg[0] = 0x0F; reg[1] = 0x02;
-    i2c_write_blocking(I2C_BUS, addr_accel_gyro, reg, 2, false);
-
-    // check if the mag could be accessed
-    reg[0] = 0x00;
-    i2c_write_blocking(I2C_BUS, addr_mag_read, reg, 1, true);
-    i2c_read_blocking(I2C_BUS, addr_mag_read, &buf, 1, false);
-#ifndef NDEBUG    
-    printf("MAG. COMPANY_ID: 0x%X\n", buf);
-#endif
-    if (buf != 0x48) return -1;
-
-    // 10 Hz continuos data output 
-    icm20948_set_mag_mode(1);
-
-    return 0;
+bool read_icm20948(repeating_timer_t *rt) {
+    icm20948_read_cal_accel(&data.accel_raw[0], &data.accel_bias[0]);
+    icm20948_read_cal_gyro(&data.gyro_raw[0], &data.gyro_bias[0]);
+    icm20948_read_raw_temp(&data.temp_raw);
+    icm20948_read_raw_mag(&data.mag_raw[0]);
+    dataflag = true;
+    return true;
 }
 
-// "static" with function means not to tell this function to linker
-// so, we can't call this function from other source files.
-static void icm20948_read_raw_accel(int16_t accel[3]) {
-    uint8_t buf[6];
-
-    // accel: 2 bytes each axis
-    uint8_t reg = 0x2D;
-    i2c_write_blocking(I2C_BUS, addr_accel_gyro, &reg, 1, true);
-    i2c_read_blocking(I2C_BUS, addr_accel_gyro, buf, 6, false);
-
-    for (uint8_t i = 0; i < 3; i++) accel[i] = (buf[i * 2] << 8 | buf[(i * 2) + 1]);
-    
+void q2e(float ret[]) {
+    // 0: roll, 1: pitch, 2: yaw
+    ret[0] = -1.0f * asinf(2.0f * q1 * q3 + 2.0f * q0 * q2);
+    ret[1] = atan2f(2.0f * q2 * q3 - 2.0f * q0 * q1, 2.0f * q0 * q0 + 2.0f * q3 * q3 - 1.0f);
+    ret[2] = atan2f(2.0f * q1 * q2 - 2.0f * q0 * q3, 2.0f * q0 * q0 + 2.0f * q1 * q1 - 1.0f);
     return;
 }
 
-static void icm20948_read_raw_gyro(int16_t gyro[3]) {
-    uint8_t buf[6];
-
-    // gyro: 2byte each axis
-    uint8_t reg = 0x33;
-    i2c_write_blocking(I2C_BUS, addr_accel_gyro, &reg, 1, true);
-    i2c_read_blocking(I2C_BUS, addr_accel_gyro, buf, 6, false);
-
-    for (uint8_t i = 0; i < 3; i++) gyro[i] = (buf[i * 2] << 8 | buf[(i * 2) + 1]);
-
-    return;
-}
-
-static void icm20948_read_raw_temp(int16_t *temp) {
-    uint8_t reg = 0x39, buf[2];
-    i2c_write_blocking(I2C_BUS, addr_accel_gyro, &reg, 1, true);
-    i2c_read_blocking(I2C_BUS, addr_accel_gyro, buf, 2, false);
-
-    *temp = (buf[0] << 8 | buf[1]);
-
-    return;
-}
-
-void icm20948_set_mag_mode(uint8_t mode) {
-    // Single measurement              : mode == 0
-    // Continuous measurement in  10 Hz: mode == 1
-    // Continuous measurement in  20 Hz: mode == 2
-    // Continuous measurement in  50 Hz: mode == 3
-    // Continuous measurement in 100 Hz: mode == 4
-    uint8_t reg[2];
-
-    switch (mode) {
-        case 0:
-            // single shot
-            // after measure, transits to power-down mode automatically
-            reg[1] = 0x01;
-            break;
-        case 1:
-            // 10Hz continuous
-            reg[1] = 0x02;
-            break;
-        case 2:
-            // 20Hz continuous
-            reg[1] = 0x04;
-            break;
-        case 3:
-            // 50Hz continuous
-            reg[1] = 0x06;
-            break;
-        case 4:
-            // 100Hz continuous
-            reg[1] = 0x08;
-            break;
-        default:
-            return;
-    }
-
-    reg[0] = 0x31;
-    i2c_write_blocking(I2C_BUS, addr_mag_read, reg, 2, false);
-
-    return;
-}
-
-static void icm20948_read_raw_mag(int16_t mag[3]) {
-    uint8_t buf[8];
-
-    uint8_t reg = 0x11;
-    i2c_write_blocking(I2C_BUS, addr_mag_read, &reg, 1,true);
-    i2c_read_blocking(I2C_BUS, addr_mag_read, buf, 8, false);
-
-    for (int i = 0; i < 3; i++) mag[i] = (buf[(i * 2) + 1] << 8 | buf[(i * 2)]);
-
-#ifndef NDEBUG
-    if ((buf[6] & 0x08) == 0x08) printf("mag: ST1: Sensor overflow\n");
-
-    // printf below works only if we read 0x10
-    //if ((buf[0] & 0x01) == 0x01) printf("mag: ST1: Data overrun\n");
-    //if ((buf[0] & 0x02) != 0x02) printf("mag: ST1: Data is NOT ready\n");
-#endif
-
-    return;
-}
-
-int main (void) {
+int main(void) {
     stdio_init_all();
 
     i2c_init(I2C_BUS, 400 * 1000); // 400kHz
@@ -152,22 +45,56 @@ int main (void) {
 
     sleep_ms(2000);
     printf("hello, this is pico!\n");
-    icm20948_init();
+    if (icm20948_init() == 0) printf("successfully initialized!\n");
+    icm20948_cal_gyro(&data.gyro_bias[0]);
+    printf("calibrated gyro: %d %d %d\n", data.gyro_bias[0], data.gyro_bias[1], data.gyro_bias[2]);
+    icm20948_cal_accel(&data.accel_bias[0]);
+    printf("calibrated accel: %d %d %d\n", data.accel_bias[0], data.accel_bias[1], data.accel_bias[2]);
+    sleep_ms(2000);
 
-    int16_t accel[3], gyro[3], mag[3], temp;
+    static repeating_timer_t timer;
+    add_repeating_timer_ms(-10, &read_icm20948, NULL, &timer);
+
+    int16_t accel_raw[3] = {0}, gyro_raw[3] = {0}, mag_raw[3] = {0}, temp_raw = 0;
+    float accel_g[3] = {0}, gyro_dps[3] = {0}, mag_ut[3] = {0}, temp_c = 0;
 
     while(1) {
-        icm20948_read_raw_accel(accel);
-        icm20948_read_raw_gyro(gyro);
-        icm20948_read_raw_temp(&temp);
-        icm20948_read_raw_mag(mag);
+        if (dataflag) {
+            dataflag = false;
+            // 0: x, 1: y, 2: z
+            accel_g[0] = (float)data.accel_raw[0] / 16384.0f;
+            accel_g[1] = (float)data.accel_raw[1] / 16384.0f;
+            accel_g[2] = (float)data.accel_raw[2] / 16384.0f;
+            gyro_dps[0] = (float)data.gyro_raw[0] / 131.0f;
+            gyro_dps[1] = (float)data.gyro_raw[1] / 131.0f;
+            gyro_dps[2] = (float)data.gyro_raw[2] / 131.0f;
+            mag_ut[0] = (float)data.mag_raw[1];
+            mag_ut[1] = (float)-data.mag_raw[0];
+            mag_ut[2] = (float)-data.mag_raw[2];
+            temp_c = (((float)data.temp_raw - 21.0f) / 333.87) + 21.0f;
 
-        printf("accel. x: %+2.5f, y: %+2.5f, z:%+2.5f\n", (float)accel[0] / 16384, (float)accel[1] / 16384, (float)accel[2] / 16384);
-        printf("gyro.  x: %+2.5f, y: %+2.5f, z:%+2.5f\n", (float)gyro[0] / 250, (float)gyro[1] / 250, (float)gyro[2] / 250);
-        printf("mag.   x: %+2.5f, y: %+2.5f, z:%+2.5f\n", (float)mag[0] / 4900, (float)mag[1] / 4900, (float)mag[2] / 4900);
-        printf("temp: %+2.5f\n", (((float)temp - 21) / 333.87) + 21);
+            //MadgwickAHRSupdate(gyro_dps[0], gyro_dps[1], gyro_dps[2], accel_g[0] * 9.8, accel_g[1] * 9.8, accel_g[2] * 9.8, mag_ut[0], mag_ut[1], mag_ut[2]);
+            MadgwickAHRSupdateIMU(gyro_dps[0], gyro_dps[1], gyro_dps[2], accel_g[0] * 9.8, accel_g[1] * 9.8, accel_g[2] * 9.8);
+            float euler[3];
+            q2e(euler);
 
-        sleep_ms(100);
+            //printf("q0 %0.1f, q1 %0.1f, q2 %0.1f, q3 %0.1f\n", q0, q1, q2, q3);
+            //printf("Roll %0.1f, Pitch %0.1f, Yaw %0.1f\n", euler[0] * 57.29578f, euler[1] * 57.29578f, euler[2] * 57.29578f + 180.0f);
+            printf("D %0.1f %0.1f %0.1f\n", euler[2] * 57.29578f, euler[1] * 57.29578f, euler[0] * 57.29578f);
+
+            #if 0
+            // accel(g)   = raw_value / (65535 / full_scale)
+            // ex) if full_scale == +-4g then accel = raw_value / (65535 / 8) = raw_value / 8192
+            // gyro(dps)  = raw_value / (65535 / full_scale)
+            // ex) if full_scale == +-250dps then gyro = raw_value / (65535 / 500) = raw_value / 131
+            // mag(uT)    = raw_value / (32752 / 4912) = (approx) raw_value / 20 * 3
+            // temp  = ((raw_value - ambient_temp) / speed_of_sound) + 21
+            printf("accel. x: %+2.5f, y: %+2.5f, z:%+2.5f\n", accel_g[0], accel_g[1], accel_g[2]);
+            printf("gyro.  x: %+2.5f, y: %+2.5f, z:%+2.5f\n", gyro_dps[0], gyro_dps[1], gyro_dps[2]);
+            printf("mag.   x: %+2.5f, y: %+2.5f, z:%+2.5f\n", mag_ut[0], mag_ut[1], mag_ut[2]);
+            printf("temp: %+2.5f\n", temp_c);
+            #endif
+        }
     }
     
     return 0;

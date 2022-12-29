@@ -12,11 +12,14 @@ set(CMAKE_CXX_STANDARD 17)
 #Initialize the SDK
 pico_sdk_init()
 
+#add_subdirectory("Fusion")
+add_subdirectory("MadgwickAHRS")
+
 #Add an executable target to be build from the source files
 add_executable(test test.c)
 
 #Pull in our pico_stdlib which aggregates commonly used features
-target_link_libraries(test pico_stdlib hardware_i2c)
+target_link_libraries(test pico_stdlib hardware_i2c MadgwickAHRS)
 
 #Enable USB output, disable UART output
 pico_enable_stdio_usb(test 1)
