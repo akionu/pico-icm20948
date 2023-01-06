@@ -1,5 +1,5 @@
-#ifndef ICM20948_H
-#define ICM20948_H
+#ifndef ICM20948_REG_H
+#define ICM20948_REG_H
 
 // Mag
 #define WHO_AM_I_AK09916 0x01 
@@ -144,4 +144,4 @@
 #define I2C_SLV4_DO        		0x16
 #define I2C_SLV4_DI        		0x17
 
-#endif
+#endif // ICM20948_REG_H

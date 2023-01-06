@@ -13,17 +13,23 @@
 #ifndef MadgwickAHRS_h
 #define MadgwickAHRS_h
 
+// Type declaration
+typedef struct madgwick_ahrs {
+    volatile float beta;
+    volatile float q[4];
+} madgwick_ahrs_t;
+
 //----------------------------------------------------------------------------------------------------
 // Variable declaration
 
-extern volatile float beta;				// algorithm gain
-extern volatile float q0, q1, q2, q3;	// quaternion of sensor frame relative to auxiliary frame
+//extern volatile float beta;				// algorithm gain
+//extern volatile float q0, q1, q2, q3;	// quaternion of sensor frame relative to auxiliary frame
 
 //---------------------------------------------------------------------------------------------------
 // Function declarations
 
-void MadgwickAHRSupdate(float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz);
-void MadgwickAHRSupdateIMU(float gx, float gy, float gz, float ax, float ay, float az);
+void MadgwickAHRSupdate(madgwick_ahrs_t *data, float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz);
+void MadgwickAHRSupdateIMU(madgwick_ahrs_t *data, float gx, float gy, float gz, float ax, float ay, float az);
 
 #endif
 //=====================================================================================================
